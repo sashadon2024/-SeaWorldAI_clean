@@ -15,20 +15,18 @@ from openai import OpenAI  # ✅ новий правильний імпорт
 
 # Logging
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
 )
-logger = logging.getLogger(__name__)
 
-# Environment / Config
+# Keys
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
-NEWS_RSS = os.getenv("NEWS_RSS", "")  # comma-separated RSS feeds (optional)
-OWM_KEY = os.getenv("OWM_KEY", "")  # OpenWeatherMap key (optional)
 
 if not BOT_TOKEN or not OPENAI_KEY:
-    raise RuntimeError("Required environment variables BOT_TOKEN and OPENAI_KEY are not set")
+    raise RuntimeError("❌ Required environment variables BOT_TOKEN and OPENAI_KEY are not set")
 
-# OpenAI client (new SDK)
+# ✅ новий формат для роботи з OpenAI
 client = OpenAI(api_key=OPENAI_KEY)
 
 # Per-user language preference (in-memory). Keys are telegram user_id -> 'en'|'ua'|'ru'
