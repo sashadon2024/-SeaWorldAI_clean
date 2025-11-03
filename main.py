@@ -115,36 +115,47 @@ JOBS_TEXT = {
 # --- Command handlers ---
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    lang = get_lang_for_user(uid)
-    await update.message.reply_text(START_TEXT.get(lang, START_TEXT["en"]))
+from openai import OpenAI
 
+client = OpenAI(api_key=OPENAI_KEY)
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    lang = get_lang_for_user(uid)
-    await update.message.reply_text(HELP_TEXT.get(lang, HELP_TEXT["en"]))
-
-
-async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    args = context.args
-    if not args:
-        await update.message.reply_text("Usage: /lang en|ua|ru")
+# --- CV generation ---
+async def cv_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "🧾 Використання:\n"
+            "/cv <коротка інформація>\n\n"
+            "Приклад:\n"
+            "/cv Матрос, 3 роки досвіду на 30м яхтах, навички: швартування, двигуни"
+        )
         return
-    code = args[0].lower()
-    if code not in ("en", "ua", "ru"):
-        await update.message.reply_text("Supported: en, ua, ru")
-        return
-    user_lang[uid] = code
-    texts = {"en": "Language set to English", "ua": "Мову встановлено українською", "ru": "Язык установлен на русский"}
-    await update.message.reply_text(texts.get(code, texts["en"]))
 
+    user_input = " ".join(context.args)
+    user_lang = context.user_data.get("lang", "ua")
 
-async def jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = get_lang_for_user(update.effective_user.id)
-    await update.message.reply_text(JOBS_TEXT.get(lang, JOBS_TEXT["en"]))
+    system_prompts = {
+        "ua": "Ти помічник із морського флоту. Створи коротке професійне CV українською для резюме моряка.",
+        "en": "You are a maritime assistant. Create a short professional CV in English for a seafarer resume.",
+        "ru": "Ты морской помощник. Составь краткое профессиональное резюме на русском для моряка.",
+    }
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompts[user_lang]},
+                {"role": "user", "content": user_input},
+            ],
+            max_tokens=400,
+            temperature=0.7,
+        )
+
+        answer = response.choices[0].message.content.strip()
+        await update.message.reply_text(f"📄 Твоє CV:\n\n{answer}")
+
+    except Exception as e:
+        logging.error(f"Помилка при створенні CV: {e}")
+        await update.message.reply_text("⛔ Вибач, зараз я недоступний. Спробуй пізніше.")
 
 
 # /news: fetch RSS feeds from NEWS_RSS env
