@@ -136,16 +136,12 @@ async def cv_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompts[user_lang]},
-                {"role": "user", "content": user_input},
-            ],
-            max_tokens=400,
-            temperature=0.7,
-        )
-
-        answer = response.choices[0].message.content.strip()
+    model="gpt-3.5-turbo",
+    messages=[{"role": "user", "content": user_text}],
+    max_tokens=700,
+    temperature=0.3,
+)
+answer = response.choices[0].message.content.strip()
         await update.message.reply_text(f"📄 Твоє CV:\n\n{answer}")
 
     except Exception as e:
