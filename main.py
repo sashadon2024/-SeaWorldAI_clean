@@ -3,18 +3,15 @@ import logging
 import feedparser
 import requests
 from typing import Dict
-
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    filters,
     ContextTypes,
+    filters
 )
-
-# New OpenAI SDK usage
-from openai import OpenAI
+from openai import OpenAI  # ✅ новий правильний імпорт
 
 # Logging
 logging.basicConfig(
