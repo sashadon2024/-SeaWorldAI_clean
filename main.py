@@ -152,27 +152,9 @@ async def ai_response(update, prompt):
     except Exception as e:
         await update.message.reply_text("⛔ Sorry, currently unavailable.")
         print(e)
-        
 
 # ---------- Main ----------
-def main():async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Живе спілкування — відповіді без команд"""
-    user_text = update.message.text
-    lang = user_lang.get(update.effective_user.id, "en")
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are SeaWorld AI Assistant, a friendly maritime and yacht expert who gives clear, helpful, and sometimes fun answers."},
-                {"role": "user", "content": user_text}
-            ],
-            max_tokens=400,
-            temperature=0.7
-        )
-        await update.message.reply_text(response.choices[0].message.content.strip())
-    except Exception as e:
-        print(e)
-        await update.message.reply_text("⚠️ Вибач, зараз я недоступний. Спробуй трохи пізніше 🌊")
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
@@ -184,7 +166,7 @@ def main():async def handle_chat(update: Update, context: ContextTypes.DEFAULT_T
     app.add_handler(CommandHandler("tip", tip_command))
     app.add_handler(CommandHandler("idea", idea_command))
     app.add_handler(CommandHandler("fact", fact_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ai_response))
     app.run_polling()
 
 if __name__ == "__main__":
