@@ -152,7 +152,10 @@ async def ai_response(update, prompt):
     except Exception as e:
         await update.message.reply_text("⛔ Sorry, currently unavailable.")
         print(e)
-        async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        
+
+# ---------- Main ----------
+def main():async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Живе спілкування — відповіді без команд"""
     user_text = update.message.text
     lang = user_lang.get(update.effective_user.id, "en")
@@ -170,9 +173,6 @@ async def ai_response(update, prompt):
     except Exception as e:
         print(e)
         await update.message.reply_text("⚠️ Вибач, зараз я недоступний. Спробуй трохи пізніше 🌊")
-
-# ---------- Main ----------
-def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
