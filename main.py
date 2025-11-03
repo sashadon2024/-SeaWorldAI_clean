@@ -1,466 +1,325 @@
-#!/usr/bin/env python3
-"""
-SeaWorld AI Assistant - main.py
-Single-file Telegram bot with:
-- Multilanguage support (uk/en/ru)
-- Commands: /start /help /about /news /jobs /weather /routes /tips /contact /language /ask /cv /subscribe
-- /cv: interactive form -> generates PDF CV and sends to user
-- /news, /jobs: fetch from RSS feeds (feedparser)
-- AI answers via OpenAI API (ChatCompletion)
-"""
-
 import os
 import logging
-import asyncio
-import tempfile
 import feedparser
 import requests
-from fpdf import FPDF
-from datetime import datetime
-from telegram import Update, ReplyKeyboardMarkup
+from typing import Dict
+
+from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters,
-    ContextTypes, ConversationHandler
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
 )
-import openai
 
-# ---------------------------
+# New OpenAI SDK usage
+from openai import OpenAI
+
 # Logging
-# ---------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger("SeaWorldAI")
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-# ---------------------------
-# Environment / keys
-# ---------------------------
+# Environment / Config
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_KEY")
-OWM_KEY = os.getenv("OWM_KEY")  # OpenWeatherMap (optional)
-NEWS_RSS = os.getenv("NEWS_RSS", "")  # comma separated RSS list, optional
-JOBS_RSS = os.getenv("JOBS_RSS", "")  # comma separated job feeds, optional
+NEWS_RSS = os.getenv("NEWS_RSS", "")  # comma-separated RSS feeds (optional)
+OWM_KEY = os.getenv("OWM_KEY", "")  # OpenWeatherMap key (optional)
 
 if not BOT_TOKEN or not OPENAI_KEY:
     raise RuntimeError("Required environment variables BOT_TOKEN and OPENAI_KEY are not set")
 
-openai.api_key = OPENAI_KEY
+# OpenAI client (new SDK)
+client = OpenAI(api_key=OPENAI_KEY)
 
-# ---------------------------
-# Simple in-memory storage
-# ---------------------------
-user_languages = {}           # user_id -> 'uk'/'en'/'ru'
-subscribers = set()           # user ids for digest (simple in-memory; use DB for persistence)
+# Per-user language preference (in-memory). Keys are telegram user_id -> 'en'|'ua'|'ru'
+user_lang: Dict[int, str] = {}
 
-# ---------------------------
-# Multilanguage texts
-# ---------------------------
-texts = {
-    "start": {
-        "uk": "👋 Вітаю! Я — SeaWorld AI Assistant 🌊\nПитай про яхти, море, вакансії та технічні поради.",
-        "en": "👋 Welcome! I'm SeaWorld AI Assistant 🌊\nAsk me about yachts, maritime jobs, maintenance and tips.",
-        "ru": "👋 Привет! Я — SeaWorld AI Assistant 🌊\nСпроси про яхты, вакансии, обслуживание и советы."
-    },
-    "help": {
-        "uk": "Команди:\n/start /help /about /news /jobs /weather [порт] /routes /tips /contact /language /ask (пиши питання) /cv",
-        "en": "Commands:\n/start /help /about /news /jobs /weather [port] /routes /tips /contact /language /ask (just send a question) /cv",
-        "ru": "Команды:\n/start /help /about /news /jobs /weather [порт] /routes /tips /contact /language /ask (пиши вопрос) /cv"
-    },
-    "about": {
-        "uk": "🌊 SeaWorld Life — екосистема для моряків і яхтсменів. AI-помічник відповідає і допомагає генерувати CV та шукати вакансії.",
-        "en": "🌊 SeaWorld Life — ecosystem for sailors and yachting pros. AI assistant answers questions, helps create CVs and find jobs.",
-        "ru": "🌊 SeaWorld Life — экосистема для моряков и яхтсменов. ИИ-помощник отвечает, помогает создать резюме и искать вакансии."
-    },
-    "choose_lang": {
-        "uk": "🌐 Обери мову:",
-        "en": "🌐 Choose a language:",
-        "ru": "🌐 Выберите язык:"
-    },
-    "weather_missing": {
-        "uk": "Щоб користуватися погодою, налаштуй змінну OWM_KEY або вкажи місто: /weather [порт]",
-        "en": "To use weather, set OWM_KEY env var or enter: /weather [port]",
-        "ru": "Чтобы использовать погоду, установите OWM_KEY или введите: /weather [порт]"
-    }
+# Helper: get language for user
+def get_lang_for_user(user_id: int) -> str:
+    return user_lang.get(user_id, "en")  # default English
+
+# Multi-language texts
+START_TEXT = {
+    "en": "👋 Welcome! I'm SeaWorld AI Assistant 🌊\nAsk about yachting, merchant fleet work, or technical tips.",
+    "ua": "👋 Вітаю! Я — SeaWorld AI Assistant 🌊\nПитай про яхтинг, роботу на флоті чи технічні поради.",
+    "ru": "👋 Привет! Я — SeaWorld AI Assistant 🌊\nСпрашивай про яхтинг, работу на флоте или технические советы.",
 }
 
-# ---------------------------
-# Helpers
-# ---------------------------
-def get_lang_for_user(user_id, fallback="en"):
-    return user_languages.get(user_id, fallback)
+HELP_TEXT = {
+    "en": (
+        "Commands:\n"
+        "/start - welcome\n"
+        "/help - this message\n"
+        "/lang <en|ua|ru> - set language\n"
+        "/news - latest yachting/fleet news (from RSS)\n"
+        "/jobs - useful job sites and channels\n"
+        "/cv <brief info> - generate professional CV from your short input\n"
+        "/weather <City> - current weather (if OWM_KEY configured)\n\n"
+        "Example: /cv I'm a deckhand with 3 years experience on 30m yachts."
+    ),
+    "ua": (
+        "Команди:\n"
+        "/start - привітання\n"
+        "/help - ця підказка\n"
+        "/lang <en|ua|ru> - обрати мову\n"
+        "/news - останні новини (RSS)\n"
+        "/jobs - корисні сайти та канали з вакансіями\n"
+        "/cv <коротко> - згенерувати професійне CV\n"
+        "/weather <Місто> - погода (якщо налаштовано OWM_KEY)\n\n"
+        "Приклад: /cv Я матрос з 3 роками досвіду на 30м яхтах."
+    ),
+    "ru": (
+        "Команды:\n"
+        "/start - приветствие\n"
+        "/help - это подсказка\n"
+        "/lang <en|ua|ru> - выбрать язык\n"
+        "/news - последние новости (RSS)\n"
+        "/jobs - полезные сайты и каналы с вакансиями\n"
+        "/cv <кратко> - сгенерировать профессиональное CV\n"
+        "/weather <Город> - погода (если настроен OWM_KEY)\n\n"
+        "Пример: /cv Я матрос с 3 годами опыта на 30м яхтах."
+    ),
+}
 
-def detect_lang_from_update(update: Update):
-    # prefer stored language, fallback to user's telegram language_code
+# JOBS: hardcoded starter list (you can expand)
+JOBS_TEXT = {
+    "en": (
+        "Job resources (starter):\n"
+        "- SeaWorld Jobs group: t.me/SeaWorldJobs\n"
+        "- Crewseekers: https://www.crewseekers.net\n"
+        "- Find a Crew: https://www.findacrew.net\n"
+        "- YPI Crew: https://www.ypi-crew.com\n\n"
+        "Tip: check company websites and major crewing agencies."
+    ),
+    "ua": (
+        "Ресурси вакансій (старт):\n"
+        "- SeaWorld Jobs: t.me/SeaWorldJobs\n"
+        "- Crewseekers: https://www.crewseekers.net\n"
+        "- Find a Crew: https://www.findacrew.net\n"
+        "- YPI Crew: https://www.ypi-crew.com\n\n"
+        "Порада: перевіряйте сайти компаній та великі крюінгові агенції."
+    ),
+    "ru": (
+        "Ресурсы вакансий (старт):\n"
+        "- SeaWorld Jobs: t.me/SeaWorldJobs\n"
+        "- Crewseekers: https://www.crewseekers.net\n"
+        "- Find a Crew: https://www.findacrew.net\n"
+        "- YPI Crew: https://www.ypi-crew.com\n\n"
+        "Совет: проверяйте сайты компаний и крупные крюинговые агентства."
+    ),
+}
+
+# --- Command handlers ---
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid in user_languages:
-        return user_languages[uid]
-    lc = update.effective_user.language_code or "en"
-    # normalize
-    lc = lc.lower()
-    if lc.startswith("uk"):
-        return "uk"
-    if lc.startswith("ru"):
-        return "ru"
-    return "en"
+    lang = get_lang_for_user(uid)
+    await update.message.reply_text(START_TEXT.get(lang, START_TEXT["en"]))
 
-def safe_send_text(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
-    return context.bot.send_message(chat_id=chat_id, text=text)
-
-# ---------------------------
-# Commands - simple
-# ---------------------------
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text(texts["start"][lang])
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text(texts["help"][lang])
-
-async def about_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text(texts["about"][lang])
-
-# ---------------------------
-# /language
-# ---------------------------
-async def language_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    keyboard = [['🇺🇦 Українська', '🇬🇧 English', '🇷🇺 Русский']]
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text(texts["choose_lang"][lang], reply_markup=reply_markup)
+    lang = get_lang_for_user(uid)
+    await update.message.reply_text(HELP_TEXT.get(lang, HELP_TEXT["en"]))
 
-async def set_language_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
+
+async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if "Україн" in text:
-        user_languages[uid] = "uk"
-        await update.message.reply_text("✅ Мову встановлено: Українська 🇺🇦")
-    elif "Рус" in text:
-        user_languages[uid] = "ru"
-        await update.message.reply_text("✅ Язык установлен: Русский 🇷🇺")
-    else:
-        user_languages[uid] = "en"
-        await update.message.reply_text("✅ Language set: English 🇬🇧")
-
-# ---------------------------
-# /news - fetch top N from RSS feeds
-# ---------------------------
-DEFAULT_NEWS_FEEDS = [
-    "https://www.yachtingworld.com/feed/",            # Yachting World
-    "https://www.maritime-executive.com/rss/all",     # Maritime Executive
-    "https://www.imo.org/en/MediaCentre/Pages/News.aspx?rss=1"  # IMO (may vary)
-]
-
-async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    feeds = [u for u in (NEWS_RSS.split(",") if NEWS_RSS else DEFAULT_NEWS_FEEDS) if u]
-    send_lines = []
-    count = 0
-    max_items = 5
-    for feed_url in feeds:
-        try:
-            d = feedparser.parse(feed_url)
-            for e in d.entries[:max_items]:
-                title = e.get("title", "No title")
-                link = e.get("link", "")
-                summary = e.get("summary", "") or e.get("description", "")
-                send_lines.append(f"• {title}\n{link}")
-                count += 1
-                if count >= 6:
-                    break
-        except Exception as ex:
-            logger.exception("Error parsing feed %s: %s", feed_url, ex)
-        if count >= 6:
-            break
-    if not send_lines:
-        await update.message.reply_text({
-            "uk": "Немає новин. Перевір налаштування RSS або додай NEWS_RSS.",
-            "en": "No news found. Check RSS settings or add NEWS_RSS env var.",
-            "ru": "Новостей не найдено. Проверьте RSS или добавьте NEWS_RSS."
-        }[lang])
-        return
-    await update.message.reply_text("\n\n".join(send_lines[:6]))
-
-# ---------------------------
-# /jobs - similar RSS / JSON job sources
-# ---------------------------
-DEFAULT_JOB_FEEDS = [
-    "https://www.yotspot.com/jobs/rss",      # (example) may or may not exist
-    # add more job RSS endpoints or API endpoints here
-]
-
-async def jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    feeds = [u for u in (JOBS_RSS.split(",") if JOBS_RSS else DEFAULT_JOB_FEEDS) if u]
-    items = []
-    for feed_url in feeds:
-        try:
-            d = feedparser.parse(feed_url)
-            for e in d.entries[:5]:
-                items.append(f"• {e.get('title','No title')}\n{e.get('link','')}")
-        except Exception:
-            logger.exception("Job feed error for %s", feed_url)
-    if not items:
-        await update.message.reply_text({
-            "uk": "Немає вакансій. Додай JOBS_RSS або перевір джерела.",
-            "en": "No jobs found. Add JOBS_RSS or check sources.",
-            "ru": "Вакансий не найдено. Добавьте JOBS_RSS или проверьте источники."
-        }[lang])
-        return
-    await update.message.reply_text("\n\n".join(items[:8]))
-
-# ---------------------------
-# /weather [location] (uses OpenWeatherMap)
-# ---------------------------
-async def weather_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    if not OWM_KEY:
-        return await update.message.reply_text(texts["weather_missing"][lang])
     args = context.args
     if not args:
-        return await update.message.reply_text({
-            "uk": "Вкажи порт або місто: /weather Split",
-            "en": "Specify port or city: /weather Split",
-            "ru": "Укажите порт или город: /weather Split"
-        }[lang])
+        await update.message.reply_text("Usage: /lang en|ua|ru")
+        return
+    code = args[0].lower()
+    if code not in ("en", "ua", "ru"):
+        await update.message.reply_text("Supported: en, ua, ru")
+        return
+    user_lang[uid] = code
+    texts = {"en": "Language set to English", "ua": "Мову встановлено українською", "ru": "Язык установлен на русский"}
+    await update.message.reply_text(texts.get(code, texts["en"]))
+
+
+async def jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang_for_user(update.effective_user.id)
+    await update.message.reply_text(JOBS_TEXT.get(lang, JOBS_TEXT["en"]))
+
+
+# /news: fetch RSS feeds from NEWS_RSS env
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang_for_user(update.effective_user.id)
+    if not NEWS_RSS:
+        texts = {
+            "en": "No RSS feeds configured. Please ask admin to add NEWS_RSS.",
+            "ua": "RSS стрічки не налаштовані. Попросіть адміністратора додати NEWS_RSS.",
+            "ru": "RSS ленты не настроены. Попросите администратора добавить NEWS_RSS.",
+        }
+        await update.message.reply_text(texts.get(lang))
+        return
+
+    feeds = [u.strip() for u in NEWS_RSS.split(",") if u.strip()]
+    messages = []
+    max_items = 3
+    try:
+        for feed_url in feeds:
+            d = feedparser.parse(feed_url)
+            if d.bozo:
+                continue
+            title = d.feed.get("title", feed_url)
+            messages.append(f"🔹 {title}")
+            count = 0
+            for e in d.entries:
+                if count >= max_items:
+                    break
+                link = e.get("link", "")
+                entry_title = e.get("title", "No title")
+                messages.append(f"• {entry_title}\n{link}")
+                count += 1
+    except Exception as e:
+        logger.exception("Error fetching RSS")
+        await update.message.reply_text("Error reading RSS feeds.")
+        return
+
+    if not messages:
+        await update.message.reply_text("No news found.")
+    else:
+        # send in chunks if long
+        chunk = "\n\n".join(messages[:30])
+        await update.message.reply_text(chunk)
+
+
+# /weather City
+async def weather_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = get_lang_for_user(update.effective_user.id)
+    texts = {
+        "en": "Usage: /weather <City> (requires OWM_KEY configured)",
+        "ua": "Використання: /weather <Місто> (потрібен OWM_KEY)",
+        "ru": "Использование: /weather <Город> (требуется OWM_KEY)",
+    }
+    if not OWM_KEY:
+        await update.message.reply_text(texts.get(lang))
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(texts.get(lang))
+        return
     city = " ".join(args)
     try:
-        url = f"http://api.openweathermap.org/data/2.5/weather?q={requests.utils.quote(city)}&appid={OWM_KEY}&units=metric"
-        r = requests.get(url, timeout=10)
+        url = "https://api.openweathermap.org/data/2.5/weather"
+        params = {"q": city, "appid": OWM_KEY, "units": "metric", "lang": "en"}
+        r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
-        j = r.json()
-        desc = j["weather"][0]["description"]
-        temp = j["main"]["temp"]
-        wind = j.get("wind", {}).get("speed", 0)
-        reply = {
-            "uk": f"Погода в {city}: {desc}, {temp}°C, вітер {wind} m/s",
-            "en": f"Weather in {city}: {desc}, {temp}°C, wind {wind} m/s",
-            "ru": f"Погода в {city}: {desc}, {temp}°C, ветер {wind} m/s"
-        }[lang]
+        data = r.json()
+        weather = data["weather"][0]["description"].capitalize()
+        temp = data["main"]["temp"]
+        feels = data["main"].get("feels_like")
+        wind = data["wind"].get("speed")
+        reply = f"Weather in {city}:\n{weather}\nTemp: {temp}°C\nFeels like: {feels}°C\nWind: {wind} m/s"
+        await update.message.reply_text(reply)
     except Exception as e:
         logger.exception("Weather error")
-        reply = {
-            "uk": "Не вдалося отримати погоду.",
-            "en": "Could not fetch weather.",
-            "ru": "Не удалось получить погоду."
-        }[lang]
-    await update.message.reply_text(reply)
+        await update.message.reply_text("Could not fetch weather. Check city name or OWM_KEY.")
 
-# ---------------------------
-# /routes /tips /contact - simple canned responses
-# ---------------------------
-async def routes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "🗺️ Популярні маршрути: Хорватія, Італія, Греція.",
-        "en": "🗺️ Popular routes: Croatia, Italy, Greece.",
-        "ru": "🗺️ Популярные маршруты: Хорватия, Италия, Греция."
-    }[lang])
 
-async def tips_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "⚓ Порада: перед виходом перевір запасні системи та причеплення.",
-        "en": "⚓ Tip: check backup systems and mooring before departure.",
-        "ru": "⚓ Совет: проверьте запасные системы и швартовку перед выходом."
-    }[lang])
+# /cv <short info> -> generate CV with OpenAI
+async def cv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    lang = get_lang_for_user(uid)
+    args = context.args
+    if not args:
+        texts = {
+            "en": "Usage: /cv <brief info>. Example: /cv Deckhand, 3 years on 30m yachts, skills: lines, engine checks",
+            "ua": "Використання: /cv <коротка інформація>. Приклад: /cv Матрос, 3 роки на 30м яхтах, навички: швартування, огляд двигуна",
+            "ru": "Использование: /cv <краткая информация>. Пример: /cv Матрос, 3 года на 30м яхтах, навыки: швартовка, осмотр двигателя",
+        }
+        await update.message.reply_text(texts.get(lang))
+        return
 
-async def contact_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "📩 Контакт: seaworldlive.wordpress.com",
-        "en": "📩 Contact: seaworldlive.wordpress.com",
-        "ru": "📩 Контакт: seaworldlive.wordpress.com"
-    }[lang])
+    short_info = " ".join(args)
+    # Build prompt respecting language
+    prompt_map = {
+        "en": f"Convert the following short resume info into a professional English CV/resume suitable for yacht/crew applications:\n\n{short_info}\n\nInclude: brief profile, skills, experience (bullets), certifications (if any), contact placeholder.",
+        "ua": f"Перетвори коротку інформацію у професійне CV українською для вакансії на яхті/флоті:\n\n{short_info}\n\nДодай: профіль, навички, досвід (маркерні список), сертифікати (якщо є), контакти (заповнити).",
+        "ru": f"Преобразуй краткую информацию в профессиональное CV на русском языке для яхтинга/флота:\n\n{short_info}\n\nВключи: профиль, навыки, опыт (пункты), сертификаты (если есть), контакты (заполнить).",
+    }
+    prompt = prompt_map.get(lang, prompt_map["en"])
+    await update.message.reply_text("⏳ Generating CV...")
 
-# ---------------------------
-# /ask or plain messages => OpenAI
-# ---------------------------
-async def ai_answer(user_text: str):
-    # simple wrapper
     try:
-        resp = openai.ChatCompletion.create(
+        resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": user_text}],
-            temperature=0.25,
-            max_tokens=700
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=800,
+            temperature=0.2,
         )
-        return resp["choices"][0]["message"]["content"].strip()
+        answer = resp.choices[0].message.content.strip()
+        await update.message.reply_text(answer)
+    except Exception as e:
+        logger.exception("OpenAI CV error")
+        await update.message.reply_text("⛔ Sorry, currently unavailable. Try later.")
+
+
+# Generic message handler: pass user text to OpenAI (short Q&A)
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    lang = get_lang_for_user(uid)
+    user_text = update.message.text.strip()
+    # short help when user writes 'help' words
+    lower = user_text.lower()
+    if lower in ("help", "поміч", "довідка", "хелп", "помощь"):
+        await help_cmd(update, context)
+        return
+
+    system_prompt = {
+        "en": "You are a helpful assistant for yachting and merchant fleet professionals. Be concise and practical.",
+        "ua": "Ти корисний асистент для професіоналів яхтингу та торгового флоту. Відповідай практично й лаконічно.",
+        "ru": "Вы — полезный ассистент для профессионалов яхтинга и торгового флота. Отвечайте практично и кратко.",
+    }
+
+    try:
+        messages = [
+            {"role": "system", "content": system_prompt.get(lang, system_prompt["en"])},
+            {"role": "user", "content": user_text},
+        ]
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            max_tokens=700,
+            temperature=0.2,
+        )
+        answer = resp.choices[0].message.content.strip()
     except Exception as e:
         logger.exception("OpenAI error")
-        return None
+        answer = {
+            "en": "⛔ Sorry, I'm currently unavailable. Try again later.",
+            "ua": "⛔ Вибач, зараз я недоступний. Спробуй пізніше.",
+            "ru": "⛔ Извините, сейчас я недоступен. Попробуйте позже.",
+        }.get(lang, "Sorry, unavailable.")
+    await update.message.reply_text(answer)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    # If it starts with '/', ignore (other handlers)
-    if text.startswith("/"):
-        return
-    # treat as AI question
-    await update.message.chat.send_action(action="typing")
-    answer = await ai_answer(text)
-    if not answer:
-        lang = detect_lang_from_update(update)
-        await update.message.reply_text({
-            "uk": "⛔ Вибач, зараз я недоступний. Спробуй пізніше.",
-            "en": "⛔ Sorry, I'm unavailable right now. Try later.",
-            "ru": "⛔ Извини, сейчас я недоступен. Попробуйте позже."
-        }[lang])
-    else:
-        await update.message.reply_text(answer)
 
-# ---------------------------
-# /cv - Conversation handler: collect fields then generate PDF
-# ---------------------------
-CV_NAME, CV_POS, CV_EXP, CV_CERTS, CV_CONTACT, CV_CONFIRM = range(6)
-
-def generate_cv_pdf(data: dict, output_path: str):
-    # simple CV generator using FPDF
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=14)
-    pdf.cell(0, 8, "SeaWorld Life - Crew CV", ln=1)
-    pdf.set_font("Arial", size=12)
-    pdf.cell(0, 7, f"Name: {data.get('name','')}", ln=1)
-    pdf.cell(0, 7, f"Position: {data.get('position','')}", ln=1)
-    pdf.cell(0, 7, f"Experience: {data.get('experience','')}", ln=1)
-    pdf.cell(0, 7, "Certifications:", ln=1)
-    pdf.multi_cell(0, 6, data.get("certs",""))
-    pdf.cell(0, 7, f"Contacts: {data.get('contact','')}", ln=1)
-    pdf.ln(4)
-    pdf.set_font("Arial", size=10)
-    pdf.cell(0, 6, f"Generated: {datetime.utcnow().isoformat()} UTC", ln=1)
-    pdf.output(output_path)
-
-async def cv_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "Давай створимо CV. Введи своє повне ім'я:",
-        "en": "Let's create your CV. Enter your full name:",
-        "ru": "Давайте создадим резюме. Введите ваше полное имя:"
-    }[lang])
-    return CV_NAME
-
-async def cv_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['cv_name'] = update.message.text.strip()
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "Посада, на яку претендуєш (наприклад: Deckhand, Engineer, Stewardess):",
-        "en": "Position you apply for (e.g. Deckhand, Engineer, Stewardess):",
-        "ru": "Должность, на которую претендуете (например: Deckhand, Engineer, Stewardess):"
-    }[lang])
-    return CV_POS
-
-async def cv_pos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['cv_pos'] = update.message.text.strip()
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "Коротко опиши досвід (роки, типи суден):",
-        "en": "Briefly describe experience (years, vessel types):",
-        "ru": "Кратко опишите опыт (годы, типы судов):"
-    }[lang])
-    return CV_EXP
-
-async def cv_exp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['cv_exp'] = update.message.text.strip()
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "Перерахуйте сертифікати / STCW / курси (через коми):",
-        "en": "List certificates / STCW / courses (comma separated):",
-        "ru": "Перечислите сертификаты / STCW / курсы (через запятую):"
-    }[lang])
-    return CV_CERTS
-
-async def cv_certs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['cv_certs'] = update.message.text.strip()
-    lang = detect_lang_from_update(update)
-    await update.message.reply_text({
-        "uk": "Контакти (email / Telegram / phone):",
-        "en": "Contacts (email / Telegram / phone):",
-        "ru": "Контакты (email / Telegram / телефон):"
-    }[lang])
-    return CV_CONTACT
-
-async def cv_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['cv_contact'] = update.message.text.strip()
-    data = {
-        "name": context.user_data.get('cv_name',''),
-        "position": context.user_data.get('cv_pos',''),
-        "experience": context.user_data.get('cv_exp',''),
-        "certs": context.user_data.get('cv_certs',''),
-        "contact": context.user_data.get('cv_contact',''),
-    }
-    # create pdf
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tf:
-        pdf_path = tf.name
-    try:
-        generate_cv_pdf(data, pdf_path)
-        # send
-        await update.message.reply_document(open(pdf_path, "rb"), filename=f"{data['name']}_CV.pdf")
-    except Exception:
-        logger.exception("CV PDF generation failed")
-        await update.message.reply_text("❗ Error generating CV.")
-    finally:
-        try:
-            os.remove(pdf_path)
-        except Exception:
-            pass
-    return ConversationHandler.END
-
-async def cv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("CV creation cancelled.")
-    return ConversationHandler.END
-
-# ---------------------------
-# /subscribe - placeholder
-# ---------------------------
-async def subscribe_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    subscribers.add(uid)
-    await update.message.reply_text("✅ Subscribed to daily digest (placeholder).")
-
-# ---------------------------
-# Main: create application and handlers
-# ---------------------------
+# Setup and run
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Basic commands
-    app.add_handler(CommandHandler("start", start_cmd))
+    # Commands
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("about", about_cmd))
-    app.add_handler(CommandHandler("news", news_cmd))
+    app.add_handler(CommandHandler("lang", lang_cmd))
     app.add_handler(CommandHandler("jobs", jobs_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))
     app.add_handler(CommandHandler("weather", weather_cmd))
-    app.add_handler(CommandHandler("routes", routes_cmd))
-    app.add_handler(CommandHandler("tips", tips_cmd))
-    app.add_handler(CommandHandler("contact", contact_cmd))
-    app.add_handler(CommandHandler("language", language_cmd))
-    app.add_handler(CommandHandler("subscribe", subscribe_cmd))
+    app.add_handler(CommandHandler("cv", cv_cmd))
 
-    # Language selection by keyboard
-    app.add_handler(MessageHandler(filters.Regex("^(🇺🇦 Українська|🇬🇧 English|🇷🇺 Русский)$"), set_language_msg))
-
-    # CV conversation
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('cv', cv_start)],
-        states={
-            CV_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_name)],
-            CV_POS: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_pos)],
-            CV_EXP: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_exp)],
-            CV_CERTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_certs)],
-            CV_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_contact)],
-        },
-        fallbacks=[CommandHandler('cancel', cv_cancel)],
-        allow_reentry=True
-    )
-    app.add_handler(conv_handler)
-
-    # AI handler for plain text (fallback)
+    # Generic messages (Q&A)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Start polling
-    logger.info("Starting SeaWorld AI Bot...")
+    logger.info("Starting SeaWorld AI Assistant...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
